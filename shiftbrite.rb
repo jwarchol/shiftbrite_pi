@@ -2,87 +2,77 @@
 
 require "wiringpi"
 @io = WiringPi::GPIO.new(WPI_MODE_GPIO)
+@interrupted = false
+trap("INT") { puts "Interupt received"; @interrupted = true }
+@debug = false
 
 @datapin   = 4  # DI
 @latchpin  = 17 # LI
 @enablepin = 21 # EI
 @clockpin  = 22 # CI
-#long @sb_CommandPacket
-#int @sb_CommandMode
-#int @sb_BlueCommand
-#int @sb_RedCommand
-#int @sb_GreenCommand
 
-def delay(ms)
-  sleep ms * 0.001
-end
+def delay(ms); sleep ms * 0.001; end
 
 def setup()
-   @io.mode(@datapin, OUTPUT)
-   @io.mode(@latchpin, OUTPUT)
-   @io.mode(@enablepin, OUTPUT)
-   @io.mode(@clockpin, OUTPUT)
+  @io.mode(@datapin, OUTPUT)
+  @io.mode(@latchpin, OUTPUT)
+  @io.mode(@enablepin, OUTPUT)
+  @io.mode(@clockpin, OUTPUT)
 
-   @io.write(@latchpin, LOW)
-   @io.write(@enablepin, LOW)
-   puts "setup complete"
+  @io.write(@latchpin, LOW)
+  @io.write(@enablepin, LOW)
+  puts "setup complete"
 end
 
-def set_rgb(r,g,b)
-    @sb_RedCommand = r # Maximum red
-    @sb_GreenCommand = g # Minimum green
-    @sb_BlueCommand = b # Minimum blue
-    sb_SendPacket()
+def sb_SendPacket(r=0,g=0,b=0,c=0b00,packet=0)
+  packet = (packet << 2)  | (c & 0b11); puts packet.to_s(2).rjust(32, "0") if @debug
+  packet = (packet << 10) | (b & 1023); puts packet.to_s(2).rjust(32, "0") if @debug
+  packet = (packet << 10) | (r & 1023); puts packet.to_s(2).rjust(32, "0") if @debug
+  packet = (packet << 10) | (g & 1023); puts packet.to_s(2).rjust(32, "0") if @debug
+  bits = packet.to_s(2).rjust(32, "0").chars.to_a
+  bits.insert(22, "_").insert(12, "_").insert(2, "_").insert(1, "_")
+  bit_str = bits.join("")
+  c_str = c.to_s(2).rjust(2,"0")
+  r_str = r.to_s(2).rjust(10,"0")
+  g_str = g.to_s(2).rjust(10,"0")
+  b_str = b.to_s(2).rjust(10,"0")
+  #puts "cmd: #{c_str}\tr: #{r_str},#{g_str},#{b_str}\tpacket: #{bit_str}"
+
+  s1 = 0b11111111_00000000_00000000_00000000
+  s2 = 0b00000000_11111111_00000000_00000000
+  s3 = 0b00000000_00000000_11111111_00000000
+  s4 = 0b00000000_00000000_00000000_11111111
+  @io.shiftOut(@datapin, @clockpin, MSBFIRST, (s1 & packet) >> 24)
+  @io.shiftOut(@datapin, @clockpin, MSBFIRST, (s2 & packet) >> 16)
+  @io.shiftOut(@datapin, @clockpin, MSBFIRST, (s3 & packet) >> 8)
+  @io.shiftOut(@datapin, @clockpin, MSBFIRST, (s4 & packet))
+  delay(5) # adjustment may be necessary depending on chain length
 end
 
-def sb_SendPacket()
-   @sb_CommandPacket = @sb_CommandMode & 0b11
-   @sb_CommandPacket = (@sb_CommandPacket << 10)  | (@sb_BlueCommand  & 1023)
-   @sb_CommandPacket = (@sb_CommandPacket << 10)  | (@sb_RedCommand   & 1023)
-   @sb_CommandPacket = (@sb_CommandPacket << 10)  | (@sb_GreenCommand & 1023)
-   #puts "@sb_CommandPacket: #{@sb_CommandPacket.to_s(2)}"
-
-   s1 = 0b11111111_00000000_00000000_00000000
-   s2 = 0b00000000_11111111_00000000_00000000
-   s3 = 0b00000000_00000000_11111111_00000000
-   s4 = 0b00000000_00000000_00000000_11111111
-   @io.shiftOut(@datapin, @clockpin, MSBFIRST, (s1 & @sb_CommandPacket) >> 24)
-   @io.shiftOut(@datapin, @clockpin, MSBFIRST, (s2 & @sb_CommandPacket) >> 16)
-   @io.shiftOut(@datapin, @clockpin, MSBFIRST, (s3 & @sb_CommandPacket) >> 8)
-   @io.shiftOut(@datapin, @clockpin, MSBFIRST, (s4 & @sb_CommandPacket))
-
-   delay(5) # adjustment may be necessary depending on chain length
-   @io.write(@latchpin,HIGH) # latch data into registers
-   delay(5) # adjustment may be necessary depending on chain length
-   @io.write(@latchpin,LOW)
+def latch
+  @io.write(@latchpin,HIGH) # latch data into registers
+  delay(5) # adjustment may be necessary depending on chain length
+  @io.write(@latchpin,LOW)
+  puts "LATCH" if @debug
 end
 
 def main
   setup
-  loop do
-    @sb_CommandMode = 0b01 # Write to current control registers
-    set_rgb 127, 127, 127 # Full current
-    sb_SendPacket()
-
-    @sb_CommandMode = 0b00 # Write to PWM control registers
-    set_rgb 0, 0, 0
-    sb_SendPacket()
-    delay(900)
-    
-    @sb_CommandMode = 0b00 # Write to PWM control registers
-    set_rgb 1023, 0, 0 # Maximum red
-    6.times { sb_SendPacket() }
-    delay(100)
-#next
-    @sb_CommandMode = 0b00 # Write to PWM control registers
-    set_rgb 0, 1023, 0 # Maximum green
-    6.times { sb_SendPacket() }
-    delay(100)
-
-    @sb_CommandMode = 0b00 # Write to PWM control registers
-    set_rgb 0, 0, 1023 # Maximum blue
-    6.times { sb_SendPacket() }
-    delay(100)
+  cnt = 0
+  dir = 1
+  while not @interrupted do
+    6.times do |i|
+      if cnt == i
+        sb_SendPacket(0,0,1023)
+      else
+        sb_SendPacket(0,0,0)
+      end
+    end
+    latch
+    if cnt == 0 then dir =  1 end
+    if cnt == 5 then dir = -1 end
+    cnt = cnt + dir
+    delay 100
   end
 end
 
